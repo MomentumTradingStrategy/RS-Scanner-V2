@@ -335,6 +335,25 @@ df["% 3M"] = df["r_3m"]
 df["% 6M"] = df["r_6m"]
 df["% 1Y"] = df["r_1y"]
 
+
+# ============================================================
+# UI (HEADER)
+# ============================================================
+st.title("Relative Strength Stock Scanner")
+st.caption(f"As of: {_asof_ts()} • RS Benchmark: {BENCHMARK}")
+
+# Info card
+st.markdown(
+    f"""
+<div class="card">
+  <h3>Universe Loaded</h3>
+  <div class="hint">This scanner uses your uploaded dataset from GitHub (no user uploads).</div>
+  <div class="small-muted">File: <b>{DATA_FILE}</b> • Rows: <b>{len(df):,}</b></div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
 # ============================================================
 # SIDEBAR CONTROLS
 # ============================================================
