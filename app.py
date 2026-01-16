@@ -86,6 +86,7 @@ SPECIAL_TICKER_MAP = {
     "BRKB": "BRK.B",
 }
 
+
 def normalize_ticker(t: str) -> str:
     t = (t or "").strip().upper()
     t = t.replace(" ", "")
@@ -112,7 +113,7 @@ def to_float_pct_series(s: pd.Series) -> pd.Series:
     return out
 
 
-def find_col(df: pd.DataFrame, keys: list[str]) -> str | None:
+def find_col(df: pd.DataFrame, keys: list[str]):
     cols = [str(c) for c in df.columns]
     for c in cols:
         name = c.lower().strip()
@@ -136,7 +137,10 @@ def rs_bg(v):
         r = int(255 - ((x - 0.5) / 0.5) * (255 - 40))
         g = 200
     b = 60
-    return f"background-color: rgb({r},{g},{b}); color:#0B0B0B; font-weight:900; border-radius:6px; padding:2px 6px; display:inline-block; min-width:32px; text-align:center;"
+    return (
+        f"background-color: rgb({r},{g},{b}); color:#0B0B0B; font-weight:900; "
+        "border-radius:6px; padding:2px 6px; display:inline-block; min-width:32px; text-align:center;"
+    )
 
 
 def pct_style(v):
@@ -251,11 +255,11 @@ if df_raw.empty:
 
 # detect core columns
 ticker_col = find_col(df_raw, ["ticker", "symbol"]) or df_raw.columns[0]
-price_col  = find_col(df_raw, ["price", "last", "close"])
+price_col = find_col(df_raw, ["price", "last", "close"])
 
-daily_col  = find_col(df_raw, ["daily", "1d", "day"])
+daily_col = find_col(df_raw, ["daily", "1d", "day"])
 weekly_col = find_col(df_raw, ["weekly", "1w", "week", "wk"])
-monthly_col= find_col(df_raw, ["monthly", "1m", "month", "mo"])
+monthly_col = find_col(df_raw, ["monthly", "1m", "month", "mo"])
 
 # optional future cols
 m3_col = find_col(df_raw, ["3m", "quarter", "qtr"])
@@ -273,11 +277,13 @@ if price_col:
 else:
     df["Price"] = np.nan
 
+
 # Return columns: convert to fractional returns
-def safe_return(colname: str | None) -> pd.Series:
+def safe_return(colname):
     if not colname:
         return pd.Series(np.nan, index=df.index)
     return to_float_pct_series(df[colname])
+
 
 df["r_1d"] = safe_return(daily_col)
 df["r_1w"] = safe_return(weekly_col)
@@ -308,6 +314,7 @@ def rel_ret(r: pd.Series, b: float) -> pd.Series:
         return pd.Series(np.nan, index=r.index)
     return (1.0 + r) / (1.0 + b) - 1.0
 
+
 df["rr_1d"] = rel_ret(df["r_1d"], b_1d)
 df["rr_1w"] = rel_ret(df["r_1w"], b_1w)
 df["rr_1m"] = rel_ret(df["r_1m"], b_1m)
@@ -319,6 +326,7 @@ df["rr_1y"] = rel_ret(df["r_1y"], b_1y)
 def to_rs_1_99(s: pd.Series) -> pd.Series:
     x = pd.to_numeric(s, errors="coerce")
     return (x.rank(pct=True) * 99).round().clip(1, 99)
+
 
 df["RS 1D"] = to_rs_1_99(df["rr_1d"])
 df["RS 1W"] = to_rs_1_99(df["rr_1w"])
@@ -337,22 +345,11 @@ df["% 1Y"] = df["r_1y"]
 
 
 # ============================================================
-# UI (HEADER)
+# UI (HEADER)  ✅ (Universe Loaded card REMOVED)
 # ============================================================
 st.title("Relative Strength Stock Scanner")
 st.caption(f"As of: {_asof_ts()} • RS Benchmark: {BENCHMARK}")
 
-# Info card
-st.markdown(
-    f"""
-<div class="card">
-  <h3>Universe Loaded</h3>
-  <div class="hint">This scanner uses your uploaded dataset from GitHub (no user uploads).</div>
-  <div class="small-muted">File: <b>{DATA_FILE}</b> • Rows: <b>{len(df):,}</b></div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
 
 # ============================================================
 # SIDEBAR CONTROLS
@@ -366,7 +363,7 @@ with st.sidebar:
     primary_tf = st.selectbox(
         "Primary Timeframe",
         available_rs,
-        index=2 if "RS 1M" in available_rs else 0
+        index=2 if "RS 1M" in available_rs else 0,
     )
 
     rs_min = st.slider("Minimum RS Rating", 1, 99, 90, 1)
@@ -379,7 +376,7 @@ with st.sidebar:
             "Accelerating (long → short improving)",
             "Decelerating (short → long weakening)",
         ],
-        index=0
+        index=0,
     )
 
     max_results = st.slider("Max Results", 25, 2000, 200, step=25)
@@ -395,7 +392,6 @@ df_out = df.copy()
 if hide_benchmark:
     df_out = df_out[df_out["Ticker"] != bench].copy()
 
-# Choose which RS columns count (even if some are mostly NaN, it’s fine)
 rs_cols_present = [c for c in ["RS 1D", "RS 1W", "RS 1M", "RS 3M", "RS 6M", "RS 1Y"] if c in df_out.columns]
 
 if mode == "Primary timeframe only":
@@ -408,7 +404,6 @@ elif mode == "All timeframes >= threshold":
     df_f = df_out[cond].copy()
 
 elif mode == "Accelerating (long → short improving)":
-    # Use longest available vs shortest available
     long_tf = rs_cols_present[-1]
     short_tf = rs_cols_present[0]
     df_f = df_out[(df_out[short_tf] > df_out[long_tf]) & (df_out[primary_tf] >= rs_min)].copy()
@@ -418,14 +413,12 @@ else:  # Decelerating
     short_tf = rs_cols_present[0]
     df_f = df_out[(df_out[short_tf] < df_out[long_tf]) & (df_out[primary_tf] >= rs_min)].copy()
 
-# Sort best → worst by primary, then RS 1Y as tie-break (if present)
 tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
 df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
 
 st.markdown('<div class="section-title">Scanner Results</div>', unsafe_allow_html=True)
 st.markdown(f'<div class="small-muted">Matches: <b>{len(df_f):,}</b></div>', unsafe_allow_html=True)
 
-# Display columns like your dashboard
 show_cols = [
     "Ticker",
     "Price",
@@ -443,7 +436,6 @@ show_cols = [
     "% 1Y",
 ]
 
-# Ensure all exist
 for c in show_cols:
     if c not in df_f.columns:
         df_f[c] = np.nan
