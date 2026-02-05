@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import os
 
 import numpy as np
 import pandas as pd
@@ -7,9 +8,11 @@ import streamlit as st
 # ============================================================
 # CONFIG
 # ============================================================
-st.set_page_config(page_title="Relative Strength Stock Scanner", layout="wide")
+st.set_page_config(page_title="Relative Strength Stock Screener", layout="wide")
 
 BENCHMARK = "SPY"
+
+# NOTE: Your repo folder is "Data" (capital D). Linux is case-sensitive.
 DATA_FILE = "Data/Screener_Data.csv"
 SPY_FILE = "Data/SPY_Data.csv"
 
@@ -91,15 +94,16 @@ def to_float_pct_series(s: pd.Series) -> pd.Series:
 def find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     cols = [str(c) for c in df.columns]
     low = {c.lower().strip(): c for c in cols}
+
     for cand in candidates:
-        cand_l = cand.lower().strip()
+        cand_l = str(cand).lower().strip()
         if cand_l in low:
             return low[cand_l]
-    # fallback: contains match
+
     for c in cols:
         cl = c.lower()
         for cand in candidates:
-            if cand.lower() in cl:
+            if str(cand).lower() in cl:
                 return c
     return None
 
@@ -166,63 +170,6 @@ def fmt_rs(v):
         return ""
 
 
-# Sparkline from a small set of RR values (we don't have full price series)
-SPARK_CHARS = "▁▂▃▄▅▆▇█"
-
-
-def spark_from_values(vals: list[float], n=26):
-    vals = [v for v in vals if v is not None and np.isfinite(v)]
-    if len(vals) < 2:
-        return "", []
-    s = pd.Series(vals)
-    lo, hi = float(s.min()), float(s.max())
-    if hi - lo <= 1e-12:
-        mid = len(SPARK_CHARS) // 2
-        levels = [mid] * n
-        return (SPARK_CHARS[mid] * n), levels
-
-    scaled = (s - lo) / (hi - lo)
-    idx = (scaled * (len(SPARK_CHARS) - 1)).round().astype(int).clip(0, len(SPARK_CHARS) - 1).tolist()
-
-    # stretch to length n
-    out_levels = []
-    for lv in idx:
-        out_levels.extend([lv] * max(1, n // len(idx)))
-    out_levels = (out_levels + [idx[-1]] * n)[:n]
-
-    spark = "".join(SPARK_CHARS[i] for i in out_levels)
-    return spark, out_levels
-
-
-def spark_html(spark: str, levels: list[int]):
-    if not spark or not levels or len(spark) != len(levels):
-        return ""
-
-    def level_to_rgb(lv: int):
-        t = lv / 7.0
-        if t <= 0.5:
-            k = t / 0.5
-            r1, g1, b1 = 255, 80, 80
-            r2, g2, b2 = 255, 200, 60
-            r = int(r1 + (r2 - r1) * k)
-            g = int(g1 + (g2 - g1) * k)
-            b = int(b1 + (b2 - b1) * k)
-        else:
-            k = (t - 0.5) / 0.5
-            r1, g1, b1 = 255, 200, 60
-            r2, g2, b2 = 80, 255, 120
-            r = int(r1 + (r2 - r1) * k)
-            g = int(g1 + (g2 - g1) * k)
-            b = int(b1 + (b2 - b1) * k)
-        return r, g, b
-
-    spans = []
-    for ch, lv in zip(spark, levels):
-        r, g, b = level_to_rgb(int(lv))
-        spans.append(f'<span style="color: rgb({r},{g},{b}); font-weight:900;">{ch}</span>')
-    return "".join(spans)
-
-
 def render_table_html(df: pd.DataFrame, columns: list[str], height_px: int = 900):
     th = "".join([f"<th>{c}</th>" for c in columns])
 
@@ -236,8 +183,6 @@ def render_table_html(df: pd.DataFrame, columns: list[str], height_px: int = 900
                 td_class = "ticker"
             elif c == "Name":
                 td_class = "name"
-            elif c in ("RS Trend",):
-                td_class = "mono"
 
             if c == "Price":
                 cell_html = fmt_price(val)
@@ -249,8 +194,6 @@ def render_table_html(df: pd.DataFrame, columns: list[str], height_px: int = 900
                 txt = fmt_rs(val)
                 stl = rs_bg(val)
                 cell_html = f'<span style="{stl}">{txt}</span>' if stl and txt != "" else txt
-            elif c == "RS Trend":
-                cell_html = spark_html(str(val), row.get("__spark_levels", []))
             else:
                 cell_html = "" if (val is None or (isinstance(val, float) and np.isnan(val))) else str(val)
 
@@ -279,12 +222,13 @@ def load_csv(path: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def required_cols_check(df: pd.DataFrame, cols: list[str], label: str):
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        st.error(f"{label} is missing required columns: {missing}")
-        st.stop()
+if not os.path.exists(DATA_FILE):
+    st.error(f"Could not find universe file at: {DATA_FILE}")
+    st.stop()
 
+if not os.path.exists(SPY_FILE):
+    st.error(f"Could not find SPY file at: {SPY_FILE}")
+    st.stop()
 
 df_raw = load_csv(DATA_FILE)
 spy_raw = load_csv(SPY_FILE)
@@ -292,6 +236,7 @@ spy_raw = load_csv(SPY_FILE)
 if df_raw.empty:
     st.error(f"{DATA_FILE} loaded but is empty.")
     st.stop()
+
 if spy_raw.empty:
     st.error(f"{SPY_FILE} loaded but is empty.")
     st.stop()
@@ -312,7 +257,7 @@ if not c_symbol:
     st.error("Universe CSV must include a Symbol column (or similar).")
     st.stop()
 
-# SPY file uses same headers
+# SPY file uses same headers (prefer exact matches if present)
 spy_symbol = find_col(spy_raw, ["Symbol"]) or c_symbol
 spy_1d = find_col(spy_raw, [c_1d]) if c_1d else None
 spy_1w = find_col(spy_raw, [c_1w]) if c_1w else None
@@ -348,7 +293,6 @@ def spy_ret(col):
         return np.nan
     return float(to_float_pct_series(pd.Series([spy_row[col]])).iloc[0])
 
-b_1d = spy_ret(spy_1d)
 b_1w = spy_ret(spy_1w)
 b_1m = spy_ret(spy_1m)
 b_3m = spy_ret(spy_3m)
@@ -385,30 +329,12 @@ df["% 3M"] = df["r_3m"]
 df["% 6M"] = df["r_6m"]
 df["% 1Y"] = df["r_1y"]
 
-# RS Trend sparkline (based on RR values across horizons)
-spark_vals = []
-spark_levels = []
-for i in range(len(df)):
-    vals = [
-        df.iloc[i]["rr_1y"],
-        df.iloc[i]["rr_6m"],
-        df.iloc[i]["rr_3m"],
-        df.iloc[i]["rr_1m"],
-        df.iloc[i]["rr_1w"],
-    ]
-    sp, lv = spark_from_values(vals, n=26)
-    spark_vals.append(sp)
-    spark_levels.append(lv)
-
-df["RS Trend"] = spark_vals
-df["__spark_levels"] = spark_levels
-
 
 # ============================================================
 # UI
 # ============================================================
-st.title("Relative Strength Stock Scanner")
-st.caption(f"As of: {_asof_ts()} • RS Benchmark: {BENCHMARK} • Source: CSV vs CSV")
+st.title("Relative Strength Stock Screener")
+st.caption(f"As of: {_asof_ts()} • RS Benchmark: {BENCHMARK}")
 
 with st.sidebar:
     st.subheader("Controls")
@@ -436,6 +362,7 @@ with st.sidebar:
 
     max_results = st.slider("Max Results", 25, 2000, 200, 25, key="max_results")
     hide_benchmark = st.checkbox("Hide SPY row", value=True, key="hide_benchmark")
+
 
 # ============================================================
 # SCAN LOGIC
@@ -484,7 +411,6 @@ show_cols = [
     "Ticker",
     "Name",
     "Price",
-    "RS Trend",
     "RS 1W",
     "RS 1M",
     "RS 3M",
@@ -503,10 +429,8 @@ render_table_html(df_f[show_cols].head(max_results), show_cols, height_px=950)
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 st.markdown(
     """
-**How RS is Calculated (MarketSurge-style framework):**  
-- Your CSV supplies each stock’s % change for 1W/1M/3M/6M/1Y (and 1D if included).  
-- Your SPY CSV supplies SPY’s % change for the same horizons.  
-- Relative return vs SPY: **RR = (1 + r_stock) / (1 + r_SPY) − 1**  
-- RS rating: percentile-rank RR across your universe into **1–99**.  
+**How RS is Calculated:**  
+Each stock’s performance is compared to **SPY** over the selected timeframe.  
+Then every stock is **ranked vs the entire universe** in this screener and assigned an **RS rating (1–99)**.
 """
 )
