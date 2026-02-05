@@ -1,28 +1,52 @@
-from datetime import datetime, timezone
+# app.py
+from __future__ import annotations
+
 import os
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ============================================================
-# CONFIG
-# ============================================================
 st.set_page_config(page_title="Relative Strength Stock Screener", layout="wide")
 
+# =========================
+# CONFIG
+# =========================
+DATA_DIR = "Data"
+SCREENER_FILE = "Screener_Data.csv"
+SPY_FILE = "SPY_Data.csv"
 BENCHMARK = "SPY"
 
-# NOTE: Your repo folder is "Data" (capital D). Linux is case-sensitive.
-DATA_FILE = "Data/Screener_Data.csv"
-SPY_FILE = "Data/SPY_Data.csv"
 
-
-def _asof_ts():
+def _asof_ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def find_file(*candidates: str) -> str:
+    """
+    Streamlit Cloud runs in /mount/src/<repo>. Local runs elsewhere.
+    This searches a few common locations so you don't get FileNotFoundError.
+    """
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    raise FileNotFoundError(f"Could not find file. Tried: {list(candidates)}")
+
+
+SCREENER_PATH = find_file(
+    os.path.join(DATA_DIR, SCREENER_FILE),
+    SCREENER_FILE,
+    os.path.join(".", DATA_DIR, SCREENER_FILE),
+)
+SPY_PATH = find_file(
+    os.path.join(DATA_DIR, SPY_FILE),
+    SPY_FILE,
+    os.path.join(".", DATA_DIR, SPY_FILE),
+)
+
 # =========================
-# CSS (MATCH YOUR DASHBOARD)
+# CSS (match your RS dashboard vibe)
 # =========================
 CSS = """
 <style>
@@ -30,18 +54,9 @@ CSS = """
 .section-title {font-weight: 900; font-size: 1.15rem; margin: 0.65rem 0 0.4rem 0;}
 .small-muted {opacity: 0.75; font-size: 0.9rem;}
 .hr {border-top: 1px solid rgba(255,255,255,0.12); margin: 14px 0;}
-.card {
-  border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(255,255,255,0.03);
-  border-radius: 12px;
-  padding: 12px 14px;
-  margin-bottom: 12px;
-}
-.card h3{margin:0 0 8px 0; font-size: 1.02rem; font-weight: 950;}
-.card .hint{opacity:0.72; font-size:0.88rem; margin-top:-2px; margin-bottom:10px;}
 
 .pl-table-wrap {border-radius: 10px; overflow: hidden; border: 1px solid rgba(255,255,255,0.10);}
-table.pl-table {border-collapse: collapse; width: 100%; font-size: 13px;}
+table.pl-table {border-collapse: collapse; width: 100%; font-size: 13px; table-layout: fixed;}
 table.pl-table thead th {
   position: sticky; top: 0;
   background: rgba(255,255,255,0.06);
@@ -50,68 +65,236 @@ table.pl-table thead th {
   padding: 8px 10px;
   border-bottom: 1px solid rgba(255,255,255,0.12);
   font-weight: 900;
+  white-space: nowrap;
 }
 table.pl-table tbody td{
   padding: 7px 10px;
   border-bottom: 1px solid rgba(255,255,255,0.08);
   vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-td.mono {font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
-td.ticker {font-weight: 900;}
+
+td.ticker {font-weight: 900; width: 84px;}
 td.name {white-space: normal; line-height: 1.15;}
+td.price {width: 92px;}
+td.rs {width: 64px;}
+td.pct {width: 86px; text-align:right;}
+th.pct {text-align:right;}
+
+th.rs-gap, td.rs-gap{
+  width: 74px !important;
+  max-width: 74px !important;
+  padding-left: 6px !important;
+  padding-right: 6px !important;
+}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-
-# ============================================================
-# HELPERS
-# ============================================================
-def normalize_ticker(t: str) -> str:
-    t = (t or "").strip().upper()
-    t = t.replace(" ", "")
-    t = t.replace("/", "-")
-    return t
+# =========================
+# CSV LOADERS
+# =========================
+@st.cache_data(show_spinner=False, ttl=60 * 10)
+def load_csv(path: str) -> pd.DataFrame:
+    return pd.read_csv(path)
 
 
-def to_float_pct_series(s: pd.Series) -> pd.Series:
-    """
-    Converts percent-units to fractional returns.
-    Example: 12.3 -> 0.123, "12.3%" -> 0.123
-    """
-    if s is None:
-        return pd.Series(np.nan)
+df_raw = load_csv(SCREENER_PATH)
+spy_raw = load_csv(SPY_PATH)
 
-    if getattr(s.dtype, "kind", "") in "if":
-        return pd.to_numeric(s, errors="coerce") / 100.0
-
-    ss = s.astype(str).str.strip()
-    ss = ss.str.replace("%", "", regex=False).str.replace(",", "", regex=False).str.strip()
-    ss = ss.str.replace(r"[^0-9\.\-\+]", "", regex=True)
-    return pd.to_numeric(ss, errors="coerce") / 100.0
+# =========================
+# COLUMN NORMALIZATION
+# =========================
+def to_num(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce")
 
 
-def find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    cols = [str(c) for c in df.columns]
-    low = {c.lower().strip(): c for c in cols}
-
-    for cand in candidates:
-        cand_l = str(cand).lower().strip()
-        if cand_l in low:
-            return low[cand_l]
-
-    for c in cols:
-        cl = c.lower()
-        for cand in candidates:
-            if str(cand).lower() in cl:
-                return c
-    return None
+def pct_to_decimal(v: pd.Series) -> pd.Series:
+    # CSV uses percent values like 12.34 meaning 12.34%
+    return to_num(v) / 100.0
 
 
+# Required columns (your TradingView export + SPY export)
+COL_TICKER = "Symbol"
+COL_NAME = "Description"
+COL_PRICE = "Price"
+COL_1D = "Price Change % 1 day"
+
+RET_COLS = {
+    "1W": "Performance % 1 week",
+    "1M": "Performance % 1 month",
+    "3M": "Performance % 3 months",
+    "6M": "Performance % 6 months",
+    "1Y": "Performance % 1 year",
+}
+
+# Defensive checks (so it fails loudly with a clear message)
+missing = [c for c in [COL_TICKER, COL_NAME, COL_PRICE, COL_1D, *RET_COLS.values()] if c not in df_raw.columns]
+if missing:
+    st.error(f"Missing required columns in {SCREENER_FILE}: {missing}")
+    st.stop()
+
+spy_missing = [c for c in ["Symbol", *RET_COLS.values()] if c not in spy_raw.columns]
+if spy_missing:
+    st.error(f"Missing required columns in {SPY_FILE}: {spy_missing}")
+    st.stop()
+
+# =========================
+# BUILD RS (relative return vs SPY) + RS ratings (1–99)
+# =========================
+def compute_rs_table(stocks_df: pd.DataFrame, spy_df: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame()
+    out["Ticker"] = stocks_df[COL_TICKER].astype(str).str.upper().str.strip()
+    out["Name"] = stocks_df[COL_NAME].astype(str)
+    out["Price"] = to_num(stocks_df[COL_PRICE])
+
+    # Returns (% columns)
+    out["% 1D"] = pct_to_decimal(stocks_df[COL_1D])
+    out["% 1W"] = pct_to_decimal(stocks_df[RET_COLS["1W"]])
+    out["% 1M"] = pct_to_decimal(stocks_df[RET_COLS["1M"]])
+    out["% 3M"] = pct_to_decimal(stocks_df[RET_COLS["3M"]])
+    out["% 6M"] = pct_to_decimal(stocks_df[RET_COLS["6M"]])
+    out["% 1Y"] = pct_to_decimal(stocks_df[RET_COLS["1Y"]])
+
+    # SPY single-row inputs
+    spy_row = spy_df.iloc[0]
+    spy_r = {
+        "1W": float(pct_to_decimal(pd.Series([spy_row[RET_COLS["1W"]]])).iloc[0]),
+        "1M": float(pct_to_decimal(pd.Series([spy_row[RET_COLS["1M"]]])).iloc[0]),
+        "3M": float(pct_to_decimal(pd.Series([spy_row[RET_COLS["3M"]]])).iloc[0]),
+        "6M": float(pct_to_decimal(pd.Series([spy_row[RET_COLS["6M"]]])).iloc[0]),
+        "1Y": float(pct_to_decimal(pd.Series([spy_row[RET_COLS["1Y"]]])).iloc[0]),
+    }
+
+    # Relative Return vs SPY: RR = (1+r_stock)/(1+r_spy) - 1
+    rr = {}
+    for k, col in [("1W", "% 1W"), ("1M", "% 1M"), ("3M", "% 3M"), ("6M", "% 6M"), ("1Y", "% 1Y")]:
+        rr[k] = (1.0 + out[col]) / (1.0 + spy_r[k]) - 1.0
+
+    # RS ratings 1–99 = percentile rank of RR across universe
+    for k in ["1W", "1M", "3M", "6M", "1Y"]:
+        s = pd.to_numeric(rr[k], errors="coerce")
+        out[f"RS {k}"] = (s.rank(pct=True) * 99).round().clip(1, 99)
+
+    # Convenience: RS gap (shift) = RS 1M - RS 1Y (signed)
+    out["RS GAP (1M-1Y)"] = (to_num(out["RS 1M"]) - to_num(out["RS 1Y"])).round().astype("Int64")
+
+    return out
+
+
+df = compute_rs_table(df_raw, spy_raw)
+
+# =========================
+# UI CONTROLS
+# =========================
+RS_KEYS = ["1W", "1M", "3M", "6M", "1Y"]
+
+st.title("Relative Strength Stock Screener")
+st.caption(f"As of: {_asof_ts()} • RS Benchmark: {BENCHMARK}")
+
+with st.sidebar:
+    st.subheader("Controls")
+
+    rank_by = st.selectbox("Rank by", [f"RS {k}" for k in ["1W", "1M", "3M", "6M", "1Y"]], index=1)
+    min_primary = st.slider("Minimum RS (Primary)", 1, 99, 70)
+
+    scan_mode = st.selectbox(
+        "Scan Mode",
+        [
+            "Primary timeframe only",
+            "All timeframes (1Y→6M→3M→1M)",
+            "Accelerating",
+            "Decelerating",
+        ],
+        index=0,
+    )
+
+    # Only show accel/decel knobs when relevant
+    accel_decel_strength = None
+    require_smooth = None
+    sort_mode = None
+
+    if scan_mode in ("Accelerating", "Decelerating"):
+        accel_decel_strength = st.slider("Acceleration/Deceleration Strength (RS Gap)", 0, 60, 15)
+        require_smooth = st.checkbox("Require smooth trend (1Y↔6M↔3M↔1M)", value=True)
+        sort_mode = st.selectbox("Sort results by", ["RS Gap (shift)", "Primary RS"], index=0)
+
+    max_results = st.slider("Max Results", 25, 400, 200, step=25)
+
+# =========================
+# FILTER LOGIC
+# =========================
+def is_monotonic_accel(r1y, r6m, r3m, r1m) -> bool:
+    # accelerating: strength improving into shorter horizon
+    return (r1y <= r6m) and (r6m <= r3m) and (r3m <= r1m)
+
+
+def is_monotonic_decel(r1y, r6m, r3m, r1m) -> bool:
+    # decelerating: losing momentum into shorter horizon
+    return (r1y >= r6m) and (r6m >= r3m) and (r3m >= r1m)
+
+
+def apply_scan(df_in: pd.DataFrame) -> pd.DataFrame:
+    d = df_in.copy()
+
+    # Base filter: minimum on primary timeframe
+    d = d[pd.to_numeric(d[rank_by], errors="coerce") >= float(min_primary)]
+
+    if scan_mode == "Primary timeframe only":
+        return d
+
+    if scan_mode == "All timeframes (1Y→6M→3M→1M)":
+        # Enforce ALL four longer horizons (skip 1W entirely)
+        for col in ["RS 1Y", "RS 6M", "RS 3M", "RS 1M"]:
+            d = d[pd.to_numeric(d[col], errors="coerce") >= float(min_primary)]
+        return d
+
+    # Accelerating / Decelerating
+    r1y = pd.to_numeric(d["RS 1Y"], errors="coerce")
+    r6m = pd.to_numeric(d["RS 6M"], errors="coerce")
+    r3m = pd.to_numeric(d["RS 3M"], errors="coerce")
+    r1m = pd.to_numeric(d["RS 1M"], errors="coerce")
+    gap = pd.to_numeric(d["RS GAP (1M-1Y)"], errors="coerce")
+
+    if scan_mode == "Accelerating":
+        d = d[gap >= float(accel_decel_strength)]
+        if require_smooth:
+            mask = [is_monotonic_accel(a, b, c, e) for a, b, c, e in zip(r1y, r6m, r3m, r1m)]
+            d = d[pd.Series(mask, index=d.index)]
+
+    if scan_mode == "Decelerating":
+        d = d[gap <= -float(accel_decel_strength)]
+        if require_smooth:
+            mask = [is_monotonic_decel(a, b, c, e) for a, b, c, e in zip(r1y, r6m, r3m, r1m)]
+            d = d[pd.Series(mask, index=d.index)]
+
+    return d
+
+
+df_f = apply_scan(df)
+
+# Sorting
+if scan_mode in ("Accelerating", "Decelerating"):
+    if sort_mode == "RS Gap (shift)":
+        # accelerating: biggest positive first; decelerating: most negative first
+        asc = True if scan_mode == "Decelerating" else False
+        df_f = df_f.sort_values("RS GAP (1M-1Y)", ascending=asc)
+    else:
+        df_f = df_f.sort_values(rank_by, ascending=False)
+else:
+    df_f = df_f.sort_values(rank_by, ascending=False)
+
+df_f = df_f.head(max_results)
+
+# =========================
+# RENDER HELPERS
+# =========================
 def rs_bg(v):
     try:
         v = float(v)
-    except:
+    except Exception:
         return ""
     if np.isnan(v):
         return ""
@@ -124,15 +307,29 @@ def rs_bg(v):
         g = 200
     b = 60
     return (
-        f"background-color: rgb({r},{g},{b}); color:#0B0B0B; font-weight:900; "
-        "border-radius:6px; padding:2px 6px; display:inline-block; min-width:32px; text-align:center;"
+        f"background-color: rgb({r},{g},{b}); color:#0B0B0B; "
+        "font-weight:900; border-radius:6px; padding:2px 6px; "
+        "display:inline-block; min-width:32px; text-align:center;"
     )
+
+
+def gap_bg(v):
+    # Signed shift badge: green for +, red for -
+    try:
+        iv = int(v)
+    except Exception:
+        return ""
+    if iv > 0:
+        return "background: rgba(80,255,120,0.16); color:#7CFC9A; font-weight:950; border-radius:6px; padding:2px 6px; display:inline-block; min-width:40px; text-align:center;"
+    if iv < 0:
+        return "background: rgba(255,80,80,0.18); color:#FF6B6B; font-weight:950; border-radius:6px; padding:2px 6px; display:inline-block; min-width:40px; text-align:center;"
+    return "background: rgba(255,200,60,0.16); color: rgba(255,200,60,0.98); font-weight:950; border-radius:6px; padding:2px 6px; display:inline-block; min-width:40px; text-align:center;"
 
 
 def pct_style(v):
     try:
         v = float(v)
-    except:
+    except Exception:
         return ""
     if np.isnan(v):
         return ""
@@ -145,36 +342,31 @@ def pct_style(v):
 
 def fmt_price(v):
     try:
-        if v is None or (isinstance(v, float) and np.isnan(v)):
-            return ""
         return f"${float(v):,.2f}"
-    except:
+    except Exception:
         return ""
 
 
 def fmt_pct(v):
     try:
-        if v is None or (isinstance(v, float) and np.isnan(v)):
-            return ""
         return f"{float(v):.2%}"
-    except:
+    except Exception:
         return ""
 
 
-def fmt_rs(v):
-    try:
-        if v is None or (isinstance(v, float) and np.isnan(v)):
-            return ""
-        return f"{float(v):.0f}"
-    except:
-        return ""
-
-
-def render_table_html(df: pd.DataFrame, columns: list[str], height_px: int = 900):
-    th = "".join([f"<th>{c}</th>" for c in columns])
+def render_table_html(d: pd.DataFrame, columns: list[str], height_px: int = 720):
+    ths = []
+    for c in columns:
+        cls = ""
+        if c.startswith("% "):
+            cls = ' class="pct"'
+        if c == "RS GAP (1M-1Y)":
+            cls = ' class="rs-gap"'
+        ths.append(f"<th{cls}>{c}</th>")
+    thead = "".join(ths)
 
     trs = []
-    for _, row in df.iterrows():
+    for _, row in d.iterrows():
         tds = []
         for c in columns:
             val = row.get(c, "")
@@ -183,28 +375,42 @@ def render_table_html(df: pd.DataFrame, columns: list[str], height_px: int = 900
                 td_class = "ticker"
             elif c == "Name":
                 td_class = "name"
+            elif c == "Price":
+                td_class = "price"
+            elif c.startswith("RS "):
+                td_class = "rs"
+            elif c.startswith("% "):
+                td_class = "pct"
+            elif c == "RS GAP (1M-1Y)":
+                td_class = "rs-gap"
 
             if c == "Price":
-                cell_html = fmt_price(val)
+                cell = fmt_price(val)
             elif c.startswith("% "):
                 txt = fmt_pct(val)
                 stl = pct_style(val)
-                cell_html = f'<span style="{stl}">{txt}</span>' if stl and txt != "" else txt
+                cell = f'<span style="{stl}">{txt}</span>' if txt else ""
             elif c.startswith("RS "):
-                txt = fmt_rs(val)
+                txt = "" if pd.isna(val) else f"{float(val):.0f}"
                 stl = rs_bg(val)
-                cell_html = f'<span style="{stl}">{txt}</span>' if stl and txt != "" else txt
+                cell = f'<span style="{stl}">{txt}</span>' if txt else ""
+            elif c == "RS GAP (1M-1Y)":
+                if pd.isna(val):
+                    cell = ""
+                else:
+                    txt = f"{int(val):d}"
+                    stl = gap_bg(val)
+                    cell = f'<span style="{stl}">{txt}</span>'
             else:
-                cell_html = "" if (val is None or (isinstance(val, float) and np.isnan(val))) else str(val)
+                cell = "" if pd.isna(val) else str(val)
 
-            tds.append(f'<td class="{td_class}">{cell_html}</td>')
-
+            tds.append(f'<td class="{td_class}">{cell}</td>')
         trs.append("<tr>" + "".join(tds) + "</tr>")
 
     table = f"""
     <div class="pl-table-wrap" style="max-height:{height_px}px; overflow:auto;">
       <table class="pl-table">
-        <thead><tr>{th}</tr></thead>
+        <thead><tr>{thead}</tr></thead>
         <tbody>
           {''.join(trs)}
         </tbody>
@@ -214,257 +420,13 @@ def render_table_html(df: pd.DataFrame, columns: list[str], height_px: int = 900
     st.markdown(table, unsafe_allow_html=True)
 
 
-# ============================================================
-# LOAD DATA
-# ============================================================
-@st.cache_data(show_spinner=False)
-def load_csv(path: str) -> pd.DataFrame:
-    return pd.read_csv(path)
-
-
-if not os.path.exists(DATA_FILE):
-    st.error(f"Could not find universe file at: {DATA_FILE}")
-    st.stop()
-
-if not os.path.exists(SPY_FILE):
-    st.error(f"Could not find SPY file at: {SPY_FILE}")
-    st.stop()
-
-df_raw = load_csv(DATA_FILE)
-spy_raw = load_csv(SPY_FILE)
-
-if df_raw.empty:
-    st.error(f"{DATA_FILE} loaded but is empty.")
-    st.stop()
-
-if spy_raw.empty:
-    st.error(f"{SPY_FILE} loaded but is empty.")
-    st.stop()
-
-# map columns (supports minor header variations)
-c_symbol = find_col(df_raw, ["Symbol"])
-c_name = find_col(df_raw, ["Description", "Name"])
-c_price = find_col(df_raw, ["Price", "Last"])
-
-c_1d = find_col(df_raw, ["Price Change % 1 day", "1 day", "daily"])
-c_1w = find_col(df_raw, ["Performance % 1 week", "1 week", "weekly"])
-c_1m = find_col(df_raw, ["Performance % 1 month", "1 month", "monthly"])
-c_3m = find_col(df_raw, ["Performance % 3 months", "3 months", "quarter"])
-c_6m = find_col(df_raw, ["Performance % 6 months", "6 months", "half"])
-c_1y = find_col(df_raw, ["Performance % 1 year", "1 year", "annual"])
-
-if not c_symbol:
-    st.error("Universe CSV must include a Symbol column (or similar).")
-    st.stop()
-
-# SPY file uses same headers (prefer exact matches if present)
-spy_symbol = find_col(spy_raw, ["Symbol"]) or c_symbol
-spy_1w = find_col(spy_raw, [c_1w]) if c_1w else None
-spy_1m = find_col(spy_raw, [c_1m]) if c_1m else None
-spy_3m = find_col(spy_raw, [c_3m]) if c_3m else None
-spy_6m = find_col(spy_raw, [c_6m]) if c_6m else None
-spy_1y = find_col(spy_raw, [c_1y]) if c_1y else None
-
-# Build universe frame
-df = pd.DataFrame()
-df["Ticker"] = df_raw[c_symbol].astype(str).map(normalize_ticker)
-df = df[df["Ticker"].str.len() > 0].drop_duplicates(subset=["Ticker"]).copy()
-df["Name"] = df_raw[c_name].astype(str) if c_name else df["Ticker"]
-df["Price"] = pd.to_numeric(df_raw[c_price], errors="coerce") if c_price else np.nan
-
-df["r_1d"] = to_float_pct_series(df_raw[c_1d]) if c_1d else np.nan
-df["r_1w"] = to_float_pct_series(df_raw[c_1w]) if c_1w else np.nan
-df["r_1m"] = to_float_pct_series(df_raw[c_1m]) if c_1m else np.nan
-df["r_3m"] = to_float_pct_series(df_raw[c_3m]) if c_3m else np.nan
-df["r_6m"] = to_float_pct_series(df_raw[c_6m]) if c_6m else np.nan
-df["r_1y"] = to_float_pct_series(df_raw[c_1y]) if c_1y else np.nan
-
-# Pull SPY returns from SPY file
-spy_raw["__sym__"] = spy_raw[spy_symbol].astype(str).map(normalize_ticker)
-spy_row = spy_raw[spy_raw["__sym__"] == normalize_ticker(BENCHMARK)]
-if spy_row.empty:
-    st.error(f"No row found for {BENCHMARK} in {SPY_FILE}. Make sure Symbol=SPY exists.")
-    st.stop()
-spy_row = spy_row.iloc[0]
-
-
-def spy_ret(col):
-    if not col or col not in spy_raw.columns:
-        return np.nan
-    return float(to_float_pct_series(pd.Series([spy_row[col]])).iloc[0])
-
-
-b_1w = spy_ret(spy_1w)
-b_1m = spy_ret(spy_1m)
-b_3m = spy_ret(spy_3m)
-b_6m = spy_ret(spy_6m)
-b_1y = spy_ret(spy_1y)
-
-# Relative return vs SPY
-def rel_ret(r: pd.Series, b: float) -> pd.Series:
-    if not np.isfinite(b):
-        return pd.Series(np.nan, index=r.index)
-    return (1.0 + r) / (1.0 + b) - 1.0
-
-
-df["rr_1w"] = rel_ret(df["r_1w"], b_1w)
-df["rr_1m"] = rel_ret(df["r_1m"], b_1m)
-df["rr_3m"] = rel_ret(df["r_3m"], b_3m)
-df["rr_6m"] = rel_ret(df["r_6m"], b_6m)
-df["rr_1y"] = rel_ret(df["r_1y"], b_1y)
-
-# RS 1–99 percentile rank on RR
-def to_rs_1_99(s: pd.Series) -> pd.Series:
-    x = pd.to_numeric(s, errors="coerce")
-    return (x.rank(pct=True) * 99).round().clip(1, 99)
-
-
-df["RS 1W"] = to_rs_1_99(df["rr_1w"])
-df["RS 1M"] = to_rs_1_99(df["rr_1m"])
-df["RS 3M"] = to_rs_1_99(df["rr_3m"])
-df["RS 6M"] = to_rs_1_99(df["rr_6m"])
-df["RS 1Y"] = to_rs_1_99(df["rr_1y"])
-
-# Display % columns (absolute)
-df["% 1D"] = df["r_1d"]
-df["% 1W"] = df["r_1w"]
-df["% 1M"] = df["r_1m"]
-df["% 3M"] = df["r_3m"]
-df["% 6M"] = df["r_6m"]
-df["% 1Y"] = df["r_1y"]
-
-
-# ============================================================
-# UI
-# ============================================================
-st.title("Relative Strength Stock Screener")
-st.caption(f"As of: {_asof_ts()} • RS Benchmark: {BENCHMARK}")
-
-with st.sidebar:
-    st.subheader("Controls")
-
-    primary_tf = st.selectbox(
-        "Rank by",
-        ["RS 1M", "RS 3M", "RS 6M", "RS 1Y", "RS 1W"],  # 1W allowed for ranking, not used in accel/decel chain
-        index=0,
-        key="primary_tf",
-    )
-
-    rs_min = st.slider("Minimum RS (Primary)", 1, 99, 70, 1, key="rs_min")
-
-    mode = st.selectbox(
-        "Scan Mode",
-        [
-            "Primary timeframe only",
-            "All timeframes >= threshold",
-            "Accelerating",
-            "Decelerating",
-        ],
-        index=0,
-        key="mode",
-    )
-
-    # Extra controls only relevant to accel/decel
-    accel_decel_mode = mode in ["Accelerating", "Decelerating"]
-
-    if accel_decel_mode:
-        rs_gap = st.slider("Acceleration/Deceleration Strength (RS Gap)", 0, 60, 15, 1, key="rs_gap")
-        strict_chain = st.checkbox("Require smooth trend (1Y→6M→3M→1M)", value=True, key="strict_chain")
-
-        sort_mode = st.selectbox(
-            "Sort results by",
-            ["RS Gap (shift)", "Primary timeframe"],
-            index=0,
-            key="sort_mode",
-        )
-    else:
-        rs_gap = 0
-        strict_chain = False
-        sort_mode = "Primary timeframe"
-
-    max_results = st.slider("Max Results", 25, 2000, 200, 25, key="max_results")
-
-
-# ============================================================
-# SCAN LOGIC
-# ============================================================
-bench_t = normalize_ticker(BENCHMARK)
-
-df_spy = df[df["Ticker"] == bench_t].copy()
-df_univ = df[df["Ticker"] != bench_t].copy()
-
-# RS Gap helper (used only in accel/decel)
-df_univ["RS GAP (1M-1Y)"] = (
-    pd.to_numeric(df_univ["RS 1M"], errors="coerce")
-    - pd.to_numeric(df_univ["RS 1Y"], errors="coerce")
-)
-
-rs_cols_all = ["RS 1W", "RS 1M", "RS 3M", "RS 6M", "RS 1Y"]
-
-if mode == "Primary timeframe only":
-    df_f = df_univ[df_univ[primary_tf].fillna(0) >= rs_min].copy()
-    tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
-    df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
-
-elif mode == "All timeframes >= threshold":
-    cond = True
-    for c in rs_cols_all:
-        cond = cond & (df_univ[c].fillna(0) >= rs_min)
-    df_f = df_univ[cond].copy()
-    tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
-    df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
-
-elif mode == "Accelerating":
-    # Must meet primary minimum
-    cond = (df_univ[primary_tf].fillna(0) >= rs_min)
-
-    # Must have meaningful improvement from 1Y to 1M
-    cond = cond & (df_univ["RS GAP (1M-1Y)"].fillna(-999) >= rs_gap)
-
-    if strict_chain:
-        # Smooth improvement: 1Y <= 6M <= 3M <= 1M
-        cond = cond & (df_univ["RS 1Y"] <= df_univ["RS 6M"])
-        cond = cond & (df_univ["RS 6M"] <= df_univ["RS 3M"])
-        cond = cond & (df_univ["RS 3M"] <= df_univ["RS 1M"])
-
-    df_f = df_univ[cond].copy()
-
-    if sort_mode == "RS Gap (shift)":
-        df_f = df_f.sort_values(["RS GAP (1M-1Y)", "RS 1M"], ascending=[False, False])
-    else:
-        tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
-        df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
-
-else:  # Decelerating
-    cond = (df_univ[primary_tf].fillna(0) >= rs_min)
-
-    # Must have meaningful deterioration from 1Y to 1M (negative gap)
-    cond = cond & ((-df_univ["RS GAP (1M-1Y)"]).fillna(-999) >= rs_gap)
-
-    if strict_chain:
-        # Smooth weakening: 1M <= 3M <= 6M <= 1Y
-        cond = cond & (df_univ["RS 1M"] <= df_univ["RS 3M"])
-        cond = cond & (df_univ["RS 3M"] <= df_univ["RS 6M"])
-        cond = cond & (df_univ["RS 6M"] <= df_univ["RS 1Y"])
-
-    df_f = df_univ[cond].copy()
-
-    if sort_mode == "RS Gap (shift)":
-        df_f = df_f.sort_values(["RS GAP (1M-1Y)", "RS 1Y"], ascending=[True, False])  # most negative first
-    else:
-        tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
-        df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
-
-# Always show SPY row first + results
-df_show = pd.concat([df_spy, df_f], ignore_index=True)
-
+# =========================
+# DISPLAY
+# =========================
 st.markdown('<div class="section-title">Scanner Results</div>', unsafe_allow_html=True)
-st.markdown(
-    f'<div class="small-muted">Universe: <b>{len(df_univ):,}</b> • Matches: <b>{len(df_f):,}</b> (SPY shown on top)</div>',
-    unsafe_allow_html=True
-)
+st.caption(f"Universe: {len(df):,} • Matches: {len(df_f):,}")
 
-# Columns to show
+# Columns:
 base_cols = [
     "Ticker",
     "Name",
@@ -474,30 +436,24 @@ base_cols = [
     "RS 3M",
     "RS 6M",
     "RS 1Y",
-    "% 1D",
-    "% 1W",
-    "% 1M",
-    "% 3M",
-    "% 6M",
-    "% 1Y",
 ]
+pct_cols = ["% 1D", "% 1W", "% 1M", "% 3M", "% 6M", "% 1Y"]
 
-# Only show RS GAP column when it matters (Accelerating / Decelerating)
-if mode in ["Accelerating", "Decelerating"]:
-    show_cols = base_cols.copy()
-    insert_at = show_cols.index("RS 1Y") + 1
-    show_cols.insert(insert_at, "RS GAP (1M-1Y)")
+# Show RS GAP column ONLY in Accelerating / Decelerating
+if scan_mode in ("Accelerating", "Decelerating"):
+    show_cols = base_cols + ["RS GAP (1M-1Y)"] + pct_cols
 else:
-    show_cols = base_cols
+    show_cols = base_cols + pct_cols
 
-render_table_html(df_show[show_cols].head(max_results + 1), show_cols, height_px=950)
+render_table_html(df_f, show_cols, height_px=820)
 
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 st.markdown(
     """
-**How RS is Calculated:**  
-Each stock is compared to **SPY** over a timeframe.  
-Then all stocks in your screener universe are ranked against each other and assigned an **RS rating (1–99)**.
+**How RS is Calculated:**
+- Each stock is compared to **SPY** over each timeframe (relative return vs SPY).
+- Then all stocks in your screener universe are ranked against each other and assigned an **RS rating (1–99)**.
 """
 )
+
 
