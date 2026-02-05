@@ -345,7 +345,7 @@ with st.sidebar:
 
     primary_tf = st.selectbox(
         "Rank by",
-        ["RS 1M", "RS 3M", "RS 6M", "RS 1Y", "RS 1W"],  # 1W allowed for ranking, not used in accel/decel
+        ["RS 1M", "RS 3M", "RS 6M", "RS 1Y", "RS 1W"],  # 1W allowed for ranking, not used in accel/decel chain
         index=0,
         key="primary_tf",
     )
@@ -357,19 +357,30 @@ with st.sidebar:
         [
             "Primary timeframe only",
             "All timeframes >= threshold",
-            "Accelerating (Quality + Shift)",
-            "Decelerating (Quality + Shift)",
+            "Accelerating",
+            "Decelerating",
         ],
         index=0,
         key="mode",
     )
 
-    # These make accel/decel show what you actually want (meaningful changes)
-    rs_gap = st.slider("Accel/Decel Strength (RS gap)", 0, 60, 15, 1, key="rs_gap")
-    strict_chain = st.checkbox("Require smooth trend (1Y→6M→3M→1M)", value=True, key="strict_chain")
+    # Extra controls only relevant to accel/decel
+    accel_decel_mode = mode in ["Accelerating", "Decelerating"]
 
-    # This prevents “already elite for 1Y” from flooding Accelerating
-    accel_max_1y = st.slider("Accelerating: Max RS 1Y (to find emerging leaders)", 1, 99, 85, 1, key="accel_max_1y")
+    if accel_decel_mode:
+        rs_gap = st.slider("Acceleration/Deceleration Strength (RS Gap)", 0, 60, 15, 1, key="rs_gap")
+        strict_chain = st.checkbox("Require smooth trend (1Y→6M→3M→1M)", value=True, key="strict_chain")
+
+        sort_mode = st.selectbox(
+            "Sort results by",
+            ["RS Gap (shift)", "Primary timeframe"],
+            index=0,
+            key="sort_mode",
+        )
+    else:
+        rs_gap = 0
+        strict_chain = False
+        sort_mode = "Primary timeframe"
 
     max_results = st.slider("Max Results", 25, 2000, 200, 25, key="max_results")
 
@@ -382,34 +393,33 @@ bench_t = normalize_ticker(BENCHMARK)
 df_spy = df[df["Ticker"] == bench_t].copy()
 df_univ = df[df["Ticker"] != bench_t].copy()
 
-# Helpful columns
-df_univ["RS GAP (1M-1Y)"] = pd.to_numeric(df_univ["RS 1M"], errors="coerce") - pd.to_numeric(df_univ["RS 1Y"], errors="coerce")
+# RS Gap helper (used only in accel/decel)
+df_univ["RS GAP (1M-1Y)"] = (
+    pd.to_numeric(df_univ["RS 1M"], errors="coerce")
+    - pd.to_numeric(df_univ["RS 1Y"], errors="coerce")
+)
 
 rs_cols_all = ["RS 1W", "RS 1M", "RS 3M", "RS 6M", "RS 1Y"]
 
 if mode == "Primary timeframe only":
     df_f = df_univ[df_univ[primary_tf].fillna(0) >= rs_min].copy()
-    df_f = df_f.sort_values([primary_tf, "RS 1Y"], ascending=[False, False])
+    tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
+    df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
 
 elif mode == "All timeframes >= threshold":
     cond = True
     for c in rs_cols_all:
         cond = cond & (df_univ[c].fillna(0) >= rs_min)
     df_f = df_univ[cond].copy()
-    df_f = df_f.sort_values([primary_tf, "RS 1Y"], ascending=[False, False])
+    tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
+    df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
 
-elif mode == "Accelerating (Quality + Shift)":
-    # Goal: Find emerging leaders (improving RS toward 1M), not “already maxed out” 1Y names
+elif mode == "Accelerating":
+    # Must meet primary minimum
     cond = (df_univ[primary_tf].fillna(0) >= rs_min)
 
-    # Quality anchored to the short timeframe
-    cond = cond & (df_univ["RS 1M"].fillna(0) >= rs_min)
-
-    # Meaningful improvement from 1Y -> 1M
+    # Must have meaningful improvement from 1Y to 1M
     cond = cond & (df_univ["RS GAP (1M-1Y)"].fillna(-999) >= rs_gap)
-
-    # Prevent the “99 99 99 99” crowd from dominating accelerating
-    cond = cond & (df_univ["RS 1Y"].fillna(999) <= accel_max_1y)
 
     if strict_chain:
         # Smooth improvement: 1Y <= 6M <= 3M <= 1M
@@ -418,18 +428,18 @@ elif mode == "Accelerating (Quality + Shift)":
         cond = cond & (df_univ["RS 3M"] <= df_univ["RS 1M"])
 
     df_f = df_univ[cond].copy()
-    # Sort by biggest shift first, then strongest current (1M)
-    df_f = df_f.sort_values(["RS GAP (1M-1Y)", "RS 1M"], ascending=[False, False])
 
-else:  # "Decelerating (Quality + Shift)"
-    # Goal: Find leaders losing steam (strong 1Y, weaker 1M)
+    if sort_mode == "RS Gap (shift)":
+        df_f = df_f.sort_values(["RS GAP (1M-1Y)", "RS 1M"], ascending=[False, False])
+    else:
+        tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
+        df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
+
+else:  # Decelerating
     cond = (df_univ[primary_tf].fillna(0) >= rs_min)
 
-    # Quality anchored to the long timeframe
-    cond = cond & (df_univ["RS 1Y"].fillna(0) >= rs_min)
-
-    # Meaningful deterioration from 1Y -> 1M
-    cond = cond & ((-df_univ["RS GAP (1M-1Y)"]).fillna(-999) >= rs_gap)  # RS 1Y - RS 1M >= gap
+    # Must have meaningful deterioration from 1Y to 1M (negative gap)
+    cond = cond & ((-df_univ["RS GAP (1M-1Y)"]).fillna(-999) >= rs_gap)
 
     if strict_chain:
         # Smooth weakening: 1M <= 3M <= 6M <= 1Y
@@ -438,8 +448,12 @@ else:  # "Decelerating (Quality + Shift)"
         cond = cond & (df_univ["RS 6M"] <= df_univ["RS 1Y"])
 
     df_f = df_univ[cond].copy()
-    # Sort by biggest loss of momentum first, then strongest long-term
-    df_f = df_f.sort_values(["RS GAP (1M-1Y)", "RS 1Y"], ascending=[True, False])  # more negative first
+
+    if sort_mode == "RS Gap (shift)":
+        df_f = df_f.sort_values(["RS GAP (1M-1Y)", "RS 1Y"], ascending=[True, False])  # most negative first
+    else:
+        tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
+        df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
 
 # Always show SPY row first + results
 df_show = pd.concat([df_spy, df_f], ignore_index=True)
@@ -450,7 +464,8 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-show_cols = [
+# Columns to show
+base_cols = [
     "Ticker",
     "Name",
     "Price",
@@ -459,7 +474,6 @@ show_cols = [
     "RS 3M",
     "RS 6M",
     "RS 1Y",
-    "RS GAP (1M-1Y)",
     "% 1D",
     "% 1W",
     "% 1M",
@@ -467,6 +481,14 @@ show_cols = [
     "% 6M",
     "% 1Y",
 ]
+
+# Only show RS GAP column when it matters (Accelerating / Decelerating)
+if mode in ["Accelerating", "Decelerating"]:
+    show_cols = base_cols.copy()
+    insert_at = show_cols.index("RS 1Y") + 1
+    show_cols.insert(insert_at, "RS GAP (1M-1Y)")
+else:
+    show_cols = base_cols
 
 render_table_html(df_show[show_cols].head(max_results + 1), show_cols, height_px=950)
 
