@@ -10,8 +10,8 @@ import streamlit as st
 st.set_page_config(page_title="Relative Strength Stock Scanner", layout="wide")
 
 BENCHMARK = "SPY"
-DATA_FILE = "data/Screener_Data.csv"
-SPY_FILE = "data/SPY_Data.csv"
+DATA_FILE = "Data/Screener_Data.csv"
+SPY_FILE = "Data/SPY_Data.csv"
 
 
 def _asof_ts():
