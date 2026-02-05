@@ -287,10 +287,12 @@ if spy_row.empty:
     st.stop()
 spy_row = spy_row.iloc[0]
 
+
 def spy_ret(col):
     if not col or col not in spy_raw.columns:
         return np.nan
     return float(to_float_pct_series(pd.Series([spy_row[col]])).iloc[0])
+
 
 b_1w = spy_ret(spy_1w)
 b_1m = spy_ret(spy_1m)
@@ -304,15 +306,18 @@ def rel_ret(r: pd.Series, b: float) -> pd.Series:
         return pd.Series(np.nan, index=r.index)
     return (1.0 + r) / (1.0 + b) - 1.0
 
+
 df["rr_1w"] = rel_ret(df["r_1w"], b_1w)
 df["rr_1m"] = rel_ret(df["r_1m"], b_1m)
 df["rr_3m"] = rel_ret(df["r_3m"], b_3m)
 df["rr_6m"] = rel_ret(df["r_6m"], b_6m)
 df["rr_1y"] = rel_ret(df["r_1y"], b_1y)
 
+# RS 1–99 percentile rank on RR
 def to_rs_1_99(s: pd.Series) -> pd.Series:
     x = pd.to_numeric(s, errors="coerce")
     return (x.rank(pct=True) * 99).round().clip(1, 99)
+
 
 df["RS 1W"] = to_rs_1_99(df["rr_1w"])
 df["RS 1M"] = to_rs_1_99(df["rr_1m"])
@@ -340,8 +345,8 @@ with st.sidebar:
 
     primary_tf = st.selectbox(
         "Rank by",
-        ["RS 1W", "RS 1M", "RS 3M", "RS 6M", "RS 1Y"],
-        index=1,
+        ["RS 1M", "RS 3M", "RS 6M", "RS 1Y", "RS 1W"],  # keep 1W available for ranking only
+        index=0,
         key="primary_tf",
     )
 
@@ -352,58 +357,56 @@ with st.sidebar:
         [
             "Primary timeframe only",
             "All timeframes >= threshold",
-            "Accelerating (1Y→6M→3M→1M improving)",
-            "Decelerating (1M→3M→6M→1Y weakening)",
+            "Accelerating (RS 1M > RS 1Y)",
+            "Decelerating (RS 1M < RS 1Y)",
         ],
         index=0,
         key="mode",
     )
 
     max_results = st.slider("Max Results", 25, 2000, 200, 25, key="max_results")
-    hide_benchmark = st.checkbox("Hide SPY row", value=True, key="hide_benchmark")
 
 
 # ============================================================
 # SCAN LOGIC
 # ============================================================
-df_out = df.copy()
-if hide_benchmark:
-    df_out = df_out[df_out["Ticker"] != normalize_ticker(BENCHMARK)].copy()
+bench_t = normalize_ticker(BENCHMARK)
 
-rs_cols = ["RS 1W", "RS 1M", "RS 3M", "RS 6M", "RS 1Y"]
+df_spy = df[df["Ticker"] == bench_t].copy()
+df_univ = df[df["Ticker"] != bench_t].copy()
+
+rs_cols_all = ["RS 1W", "RS 1M", "RS 3M", "RS 6M", "RS 1Y"]
 
 if mode == "Primary timeframe only":
-    df_f = df_out[df_out[primary_tf].fillna(0) >= rs_min].copy()
+    df_f = df_univ[df_univ[primary_tf].fillna(0) >= rs_min].copy()
 
 elif mode == "All timeframes >= threshold":
     cond = True
-    for c in rs_cols:
-        cond = cond & (df_out[c].fillna(0) >= rs_min)
-    df_f = df_out[cond].copy()
+    for c in rs_cols_all:
+        cond = cond & (df_univ[c].fillna(0) >= rs_min)
+    df_f = df_univ[cond].copy()
 
-elif mode.startswith("Accelerating"):
-    # ✅ FIXED: Accelerating = RS improves from long-term to short-term
-    # RS 1Y <= RS 6M <= RS 3M <= RS 1M  (no 1W per your rule)
-    cond = (df_out[primary_tf].fillna(0) >= rs_min)
-    cond = cond & (df_out["RS 1Y"] <= df_out["RS 6M"])
-    cond = cond & (df_out["RS 6M"] <= df_out["RS 3M"])
-    cond = cond & (df_out["RS 3M"] <= df_out["RS 1M"])
-    df_f = df_out[cond].copy()
+elif mode == "Accelerating (RS 1M > RS 1Y)":
+    # ✅ THIS IS THE SIMPLE, CORRECT DEFINITION YOU DESCRIBED
+    # Ignore 1W completely. Just compare long-term vs short-term.
+    cond = (df_univ[primary_tf].fillna(0) >= rs_min)
+    cond = cond & (df_univ["RS 1M"] > df_univ["RS 1Y"])
+    df_f = df_univ[cond].copy()
 
-else:
-    # Decelerating: 1M <= 3M <= 6M <= 1Y
-    cond = (df_out[primary_tf].fillna(0) >= rs_min)
-    cond = cond & (df_out["RS 3M"] >= df_out["RS 1M"])
-    cond = cond & (df_out["RS 6M"] >= df_out["RS 3M"])
-    cond = cond & (df_out["RS 1Y"] >= df_out["RS 6M"])
-    df_f = df_out[cond].copy()
+else:  # "Decelerating (RS 1M < RS 1Y)"
+    cond = (df_univ[primary_tf].fillna(0) >= rs_min)
+    cond = cond & (df_univ["RS 1M"] < df_univ["RS 1Y"])
+    df_f = df_univ[cond].copy()
 
 tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
 df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
 
+# Always show SPY row first + results
+df_show = pd.concat([df_spy, df_f], ignore_index=True)
+
 st.markdown('<div class="section-title">Scanner Results</div>', unsafe_allow_html=True)
 st.markdown(
-    f'<div class="small-muted">Universe: <b>{len(df_out):,}</b> • Matches: <b>{len(df_f):,}</b></div>',
+    f'<div class="small-muted">Universe: <b>{len(df_univ):,}</b> • Matches: <b>{len(df_f):,}</b> (SPY shown on top)</div>',
     unsafe_allow_html=True
 )
 
@@ -424,14 +427,14 @@ show_cols = [
     "% 1Y",
 ]
 
-render_table_html(df_f[show_cols].head(max_results), show_cols, height_px=950)
+render_table_html(df_show[show_cols].head(max_results + 1), show_cols, height_px=950)
 
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 st.markdown(
     """
 **How RS is Calculated:**  
-Each stock’s performance is compared to **SPY** over the selected timeframe.  
-Then every stock is **ranked vs the entire universe** in this screener and assigned an **RS rating (1–99)**.
+Each stock is compared to **SPY** over a timeframe.  
+Then all stocks in your screener universe are ranked against each other and assigned an **RS rating (1–99)**.
 """
 )
 
