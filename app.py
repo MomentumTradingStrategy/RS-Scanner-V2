@@ -59,6 +59,14 @@ table.pl-table tbody td{
 td.mono {font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
 td.ticker {font-weight: 900;}
 td.name {white-space: normal; line-height: 1.15;}
+
+/* Make RS GAP column tighter */
+th.rs-gap, td.rs-gap{
+  width: 85px;
+  min-width: 85px;
+  max-width: 85px;
+  white-space: nowrap;
+}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -171,7 +179,12 @@ def fmt_rs(v):
 
 
 def render_table_html(df: pd.DataFrame, columns: list[str], height_px: int = 900):
-    th = "".join([f"<th>{c}</th>" for c in columns])
+    # Add class to th for rs-gap so CSS applies to header too
+    ths = []
+    for c in columns:
+        th_cls = "rs-gap" if c == "RS GAP" else ""
+        ths.append(f'<th class="{th_cls}">{c}</th>')
+    th = "".join(ths)
 
     trs = []
     for _, row in df.iterrows():
@@ -179,10 +192,15 @@ def render_table_html(df: pd.DataFrame, columns: list[str], height_px: int = 900
         for c in columns:
             val = row.get(c, "")
             td_class = ""
+
             if c == "Ticker":
                 td_class = "ticker"
             elif c == "Name":
                 td_class = "name"
+            elif c == "RS GAP":
+                td_class = "mono rs-gap"
+            elif c in ["Price"] or c.startswith("% ") or c.startswith("RS "):
+                td_class = "mono"
 
             if c == "Price":
                 cell_html = fmt_price(val)
@@ -194,6 +212,14 @@ def render_table_html(df: pd.DataFrame, columns: list[str], height_px: int = 900
                 txt = fmt_rs(val)
                 stl = rs_bg(val)
                 cell_html = f'<span style="{stl}">{txt}</span>' if stl and txt != "" else txt
+            elif c == "RS GAP":
+                try:
+                    if val is None or (isinstance(val, float) and np.isnan(val)):
+                        cell_html = ""
+                    else:
+                        cell_html = f"{float(val):+.0f}"  # tight: +12 / -7
+                except:
+                    cell_html = ""
             else:
                 cell_html = "" if (val is None or (isinstance(val, float) and np.isnan(val))) else str(val)
 
@@ -300,6 +326,7 @@ b_3m = spy_ret(spy_3m)
 b_6m = spy_ret(spy_6m)
 b_1y = spy_ret(spy_1y)
 
+
 # Relative return vs SPY
 def rel_ret(r: pd.Series, b: float) -> pd.Series:
     if not np.isfinite(b):
@@ -345,7 +372,7 @@ with st.sidebar:
 
     primary_tf = st.selectbox(
         "Rank by",
-        ["RS 1M", "RS 3M", "RS 6M", "RS 1Y", "RS 1W"],  # 1W allowed for ranking, not used in accel/decel chain
+        ["RS 1M", "RS 3M", "RS 6M", "RS 1Y", "RS 1W"],
         index=0,
         key="primary_tf",
     )
@@ -390,11 +417,11 @@ with st.sidebar:
 # ============================================================
 bench_t = normalize_ticker(BENCHMARK)
 
-df_spy = df[df["Ticker"] == bench_t].copy()
+# remove SPY from the screener universe (we still use SPY returns for calculations)
 df_univ = df[df["Ticker"] != bench_t].copy()
 
 # RS Gap helper (used only in accel/decel)
-df_univ["RS GAP (1M-1Y)"] = (
+df_univ["RS GAP"] = (
     pd.to_numeric(df_univ["RS 1M"], errors="coerce")
     - pd.to_numeric(df_univ["RS 1Y"], errors="coerce")
 )
@@ -415,14 +442,10 @@ elif mode == "All timeframes >= threshold":
     df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
 
 elif mode == "Accelerating":
-    # Must meet primary minimum
     cond = (df_univ[primary_tf].fillna(0) >= rs_min)
-
-    # Must have meaningful improvement from 1Y to 1M
-    cond = cond & (df_univ["RS GAP (1M-1Y)"].fillna(-999) >= rs_gap)
+    cond = cond & (df_univ["RS GAP"].fillna(-999) >= rs_gap)
 
     if strict_chain:
-        # Smooth improvement: 1Y <= 6M <= 3M <= 1M
         cond = cond & (df_univ["RS 1Y"] <= df_univ["RS 6M"])
         cond = cond & (df_univ["RS 6M"] <= df_univ["RS 3M"])
         cond = cond & (df_univ["RS 3M"] <= df_univ["RS 1M"])
@@ -430,19 +453,16 @@ elif mode == "Accelerating":
     df_f = df_univ[cond].copy()
 
     if sort_mode == "RS Gap (shift)":
-        df_f = df_f.sort_values(["RS GAP (1M-1Y)", "RS 1M"], ascending=[False, False])
+        df_f = df_f.sort_values(["RS GAP", "RS 1M"], ascending=[False, False])
     else:
         tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
         df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
 
 else:  # Decelerating
     cond = (df_univ[primary_tf].fillna(0) >= rs_min)
-
-    # Must have meaningful deterioration from 1Y to 1M (negative gap)
-    cond = cond & ((-df_univ["RS GAP (1M-1Y)"]).fillna(-999) >= rs_gap)
+    cond = cond & ((-df_univ["RS GAP"]).fillna(-999) >= rs_gap)
 
     if strict_chain:
-        # Smooth weakening: 1M <= 3M <= 6M <= 1Y
         cond = cond & (df_univ["RS 1M"] <= df_univ["RS 3M"])
         cond = cond & (df_univ["RS 3M"] <= df_univ["RS 6M"])
         cond = cond & (df_univ["RS 6M"] <= df_univ["RS 1Y"])
@@ -450,17 +470,16 @@ else:  # Decelerating
     df_f = df_univ[cond].copy()
 
     if sort_mode == "RS Gap (shift)":
-        df_f = df_f.sort_values(["RS GAP (1M-1Y)", "RS 1Y"], ascending=[True, False])  # most negative first
+        df_f = df_f.sort_values(["RS GAP", "RS 1Y"], ascending=[True, False])  # most negative first
     else:
         tie = "RS 1Y" if "RS 1Y" in df_f.columns else primary_tf
         df_f = df_f.sort_values([primary_tf, tie], ascending=[False, False])
 
-# Always show SPY row first + results
-df_show = pd.concat([df_spy, df_f], ignore_index=True)
+df_show = df_f.reset_index(drop=True)
 
 st.markdown('<div class="section-title">Scanner Results</div>', unsafe_allow_html=True)
 st.markdown(
-    f'<div class="small-muted">Universe: <b>{len(df_univ):,}</b> • Matches: <b>{len(df_f):,}</b> (SPY shown on top)</div>',
+    f'<div class="small-muted">Universe: <b>{len(df_univ):,}</b> • Matches: <b>{len(df_f):,}</b></div>',
     unsafe_allow_html=True
 )
 
@@ -482,15 +501,15 @@ base_cols = [
     "% 1Y",
 ]
 
-# Only show RS GAP column when it matters (Accelerating / Decelerating)
+# Only show RS GAP column when it matters
 if mode in ["Accelerating", "Decelerating"]:
     show_cols = base_cols.copy()
     insert_at = show_cols.index("RS 1Y") + 1
-    show_cols.insert(insert_at, "RS GAP (1M-1Y)")
+    show_cols.insert(insert_at, "RS GAP")
 else:
     show_cols = base_cols
 
-render_table_html(df_show[show_cols].head(max_results + 1), show_cols, height_px=950)
+render_table_html(df_show[show_cols].head(max_results), show_cols, height_px=950)
 
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 st.markdown(
