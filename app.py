@@ -259,7 +259,6 @@ if not c_symbol:
 
 # SPY file uses same headers (prefer exact matches if present)
 spy_symbol = find_col(spy_raw, ["Symbol"]) or c_symbol
-spy_1d = find_col(spy_raw, [c_1d]) if c_1d else None
 spy_1w = find_col(spy_raw, [c_1w]) if c_1w else None
 spy_1m = find_col(spy_raw, [c_1m]) if c_1m else None
 spy_3m = find_col(spy_raw, [c_3m]) if c_3m else None
@@ -383,11 +382,12 @@ elif mode == "All timeframes >= threshold":
     df_f = df_out[cond].copy()
 
 elif mode.startswith("Accelerating"):
-    # Only use 1Y/6M/3M/1M (no 1W per your rule)
+    # ✅ FIXED: Accelerating = RS improves from long-term to short-term
+    # RS 1Y <= RS 6M <= RS 3M <= RS 1M  (no 1W per your rule)
     cond = (df_out[primary_tf].fillna(0) >= rs_min)
-    cond = cond & (df_out["RS 6M"] >= df_out["RS 1Y"])
-    cond = cond & (df_out["RS 3M"] >= df_out["RS 6M"])
-    cond = cond & (df_out["RS 1M"] >= df_out["RS 3M"])
+    cond = cond & (df_out["RS 1Y"] <= df_out["RS 6M"])
+    cond = cond & (df_out["RS 6M"] <= df_out["RS 3M"])
+    cond = cond & (df_out["RS 3M"] <= df_out["RS 1M"])
     df_f = df_out[cond].copy()
 
 else:
@@ -434,3 +434,4 @@ Each stock’s performance is compared to **SPY** over the selected timeframe.
 Then every stock is **ranked vs the entire universe** in this screener and assigned an **RS rating (1–99)**.
 """
 )
+
